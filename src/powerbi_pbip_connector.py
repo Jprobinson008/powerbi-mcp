@@ -1,5 +1,4 @@
 """
-Power BI PBIP (Power BI Project) Connector
 Provides file-based editing for PBIP format to safely rename tables, columns, measures
 without breaking report visuals.
 
@@ -152,10 +151,15 @@ def extract_external_refs(content: str) -> Tuple[str, Dict[str, str]]:
         return placeholder
 
     # Pattern to match external dataflow references: {[entity="...",version="..."]}[Data]
+    # Also match variations without [Data] suffix
     # This captures the entire external source reference pattern
-    external_pattern = r'\{\[entity="[^"]+",version="[^"]*"\]\}\[Data\]'
+    external_patterns = [
+        r'\{\[entity="[^"]+",version="[^"]*"\]\}\[Data\]',  # Standard: {[entity="...",version=""]}[Data]
+        r'\{\[entity="[^"]+",version="[^"]*"\]\}(?!["\w])',  # Without [Data]: {[entity="...",version=""]}
+    ]
 
-    content_with_placeholders = re.sub(external_pattern, replace_external, content)
+    for external_pattern in external_patterns:
+        content_with_placeholders = re.sub(external_pattern, replace_external, content_with_placeholders)
 
     return content_with_placeholders, external_refs
 
@@ -242,6 +246,46 @@ class RenameResult:
 
 
 class PowerBIPBIPConnector:
+
+    def _validate_file_in_project(self, file_path: Path) -> bool:
+        """
+        Validate that file_path is within current project bounds.
+        Prevents directory traversal attacks.
+        """
+        if not self.current_project:
+            return False
+        try:
+            real_path = file_path.resolve()
+            project_root = self.current_project.root_path.resolve()
+            real_path.relative_to(project_root)
+            return True
+        except Exception as e:
+            logger.error(f"File {file_path} is outside project root {project_root}: {e}")
+            return False
+
+    @staticmethod
+    def read_file_safe(file_path: Path, encodings: list = None) -> str:
+        """Read file with encoding fallback"""
+        if encodings is None:
+            encodings = ['utf-8', 'utf-16', 'latin-1', 'cp1252']
+        for encoding in encodings:
+            try:
+                with open(file_path, 'r', encoding=encoding) as f:
+                    return f.read()
+            except UnicodeDecodeError:
+                continue
+            except Exception as e:
+                logger.error(f"Error reading {file_path} with {encoding}: {e}")
+                continue
+        logger.warning(f"Could not read {file_path} with standard encodings, using lossy decode")
+        with open(file_path, 'rb') as f:
+            return f.read().decode('utf-8', errors='replace')
+
+    @staticmethod
+    def write_file_safe(file_path: Path, content: str, encoding: str = 'utf-8') -> None:
+        """Write file safely with encoding and path validation"""
+        with open(file_path, 'w', encoding=encoding) as f:
+            f.write(content)
     """
     PBIP Connector for file-based Power BI Project editing
 
@@ -273,43 +317,20 @@ class PowerBIPBIPConnector:
         Returns:
             PBIPProject if found, None otherwise
         """
-        if not search_paths:
-            # Default search locations
-            search_paths = [
-                os.path.expanduser("~/Documents"),
-                os.path.expanduser("~/Desktop"),
-                os.path.expanduser("~/Downloads"),
-                "C:/",
-            ]
-
-        # Also check common development folders
-        for base in ["C:/Users", os.path.expanduser("~")]:
-            for folder in ["Projects", "Work", "Dev", "GitHub", "Repos"]:
-                path = os.path.join(base, folder)
-                if os.path.exists(path):
-                    search_paths.append(path)
-
         for search_path in search_paths:
-            if not os.path.exists(search_path):
-                continue
-
-            # Look for .pbip files
-            try:
-                for root, dirs, files in os.walk(search_path):
-                    # Limit depth to avoid searching too deep
-                    depth = root.replace(search_path, '').count(os.sep)
-                    if depth > 5:
-                        continue
-
-                    for file in files:
-                        if file.endswith('.pbip'):
-                            pbip_path = Path(root) / file
-                            project = PowerBIPBIPConnector._parse_pbip_project(pbip_path)
-                            if project:
-                                # Check if model name matches
-                                if project.semantic_model_folder and model_name.lower() in project.semantic_model_folder.name.lower():
-                                    logger.info(f"Found PBIP project for model '{model_name}' at: {pbip_path}")
-                                    return project
+            for root, dirs, files in os.walk(search_path):
+                depth = root.replace(search_path, '').count(os.sep)
+                if depth > 5:
+                    continue
+                for file in files:
+                    if file.endswith('.pbip'):
+                        pbip_path = Path(root) / file
+                        project = PowerBIPBIPConnector._parse_pbip_project(pbip_path)
+                        if project:
+                            # Check if model name matches
+                            if project.semantic_model_folder and model_name.lower() in project.semantic_model_folder.name.lower():
+                                logger.info(f"Found PBIP project for model '{model_name}' at: {pbip_path}")
+                                return project
             except PermissionError:
                 continue
 
@@ -317,15 +338,7 @@ class PowerBIPBIPConnector:
 
     @staticmethod
     def find_pbip_from_path(pbip_path: str) -> Optional[PBIPProject]:
-        """
-        Parse a PBIP project from a given path
-
-        Args:
-            pbip_path: Path to the .pbip file or project folder
-
-        Returns:
-            PBIPProject if valid, None otherwise
-        """
+        """Parse a PBIP project from a given path."""
         path = Path(pbip_path)
 
         # If it's a folder, look for .pbip file inside
@@ -476,7 +489,7 @@ class PowerBIPBIPConnector:
             return None
 
         try:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             backup_name = f"{self.current_project.pbip_file.stem}_backup_{timestamp}"
             backup_path = self.current_project.root_path.parent / backup_name
 
@@ -495,8 +508,10 @@ class PowerBIPBIPConnector:
         """Cache original file content for potential rollback"""
         if str(file_path) not in self._original_files:
             try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    self._original_files[str(file_path)] = f.read()
+                if not self._validate_file_in_project(file_path):
+                    logger.warning(f"File {file_path} is outside project root, not caching.")
+                    return
+                self._original_files[str(file_path)] = self.read_file_safe(file_path)
             except Exception as e:
                 logger.warning(f"Could not cache file {file_path}: {e}")
 
@@ -513,8 +528,11 @@ class PowerBIPBIPConnector:
 
         try:
             for file_path, content in self._original_files.items():
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write(content)
+                path_obj = Path(file_path)
+                if not self._validate_file_in_project(path_obj):
+                    logger.warning(f"File {file_path} is outside project root, not rolling back.")
+                    continue
+                self.write_file_safe(path_obj, content)
 
             logger.info(f"Rolled back {len(self._original_files)} file(s)")
             self._original_files = {}
@@ -747,6 +765,14 @@ class PowerBIPBIPConnector:
         4. Updates cultures files (linguistic schema)
 
         Supports both PBIR-Legacy (report.json) and PBIR-Enhanced (visual.json files) formats.
+        """
+        if old_name == new_name:
+            return RenameResult(
+                success=False,
+                message="Old name and new name are identical - no changes needed",
+                files_modified=[],
+                references_updated=0
+            )
 
         Args:
             old_name: Current table name
@@ -811,7 +837,6 @@ class PowerBIPBIPConnector:
             validation_errors=validation_errors,
             backup_created=backup_path
         )
-
     def rename_column_in_files(self, table_name: str, old_name: str, new_name: str) -> RenameResult:
         """
         Rename a column across all PBIP files
@@ -826,6 +851,13 @@ class PowerBIPBIPConnector:
         Returns:
             RenameResult with details
         """
+        if old_name == new_name:
+            return RenameResult(
+                success=False,
+                message="Old name and new name are identical - no changes needed",
+                files_modified=[],
+                references_updated=0
+            )
         if not self.current_project:
             return RenameResult(False, "No project loaded", [], 0)
 
@@ -879,6 +911,13 @@ class PowerBIPBIPConnector:
         Returns:
             RenameResult with details
         """
+        if old_name == new_name:
+            return RenameResult(
+                success=False,
+                message="Old name and new name are identical - no changes needed",
+                files_modified=[],
+                references_updated=0
+            )
         if not self.current_project:
             return RenameResult(False, "No project loaded", [], 0)
 
