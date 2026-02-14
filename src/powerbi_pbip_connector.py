@@ -645,57 +645,62 @@ class PowerBIPBIPConnector:
         total_fixes = 0
         errors = []
 
-        # First, collect all table names in the project
-        table_names = set()
+        # First, collect all table names in the project (OPTIMIZATION: cache file content during this pass)
+        table_names = {}  # {table_name: quoted_name}
+        table_file_content_cache = {}  # Cache content for reuse - avoids redundant file I/O
+        
         try:
             for tmdl_file in self.current_project.tmdl_files:
                 with open(tmdl_file, 'r', encoding='utf-8') as f:
                     content = f.read()
+                    table_file_content_cache[str(tmdl_file)] = content
+                    
                 # Find all table declarations - both quoted and unquoted
                 # Pattern 1: table 'Name With Spaces'
                 for match in re.finditer(r"^(?:\s*)table\s+'([^']+)'", content, re.MULTILINE):
                     table_name = match.group(1).replace("''", "'")  # Unescape quotes
-                    table_names.add(table_name)
+                    if needs_tmdl_quoting(table_name):
+                        table_names[table_name] = quote_tmdl_name(table_name)
                 # Pattern 2: table UnquotedName
                 for match in re.finditer(r"^(?:\s*)table\s+(\w+)\s*$", content, re.MULTILINE):
-                    table_names.add(match.group(1))
+                    table_name = match.group(1)
+                    if needs_tmdl_quoting(table_name):
+                        table_names[table_name] = quote_tmdl_name(table_name)
         except Exception as e:
             logger.warning(f"Could not extract table names: {e}")
 
-        # Filter to only tables that need quoting
-        tables_needing_quotes = [t for t in table_names if needs_tmdl_quoting(t)]
-
-        if not tables_needing_quotes:
+        if not table_names:
             return {"files_modified": [], "count": 0, "errors": []}
 
-        # Now process each file and fix DAX expressions
+        # Process files using cached content (no redundant I/O) - OPTIMIZATION
         for tmdl_file in self.current_project.tmdl_files:
             try:
                 self._cache_file_content(tmdl_file)
-
-                with open(tmdl_file, 'r', encoding='utf-8') as f:
-                    content = f.read()
+                
+                tmdl_file_str = str(tmdl_file)
+                content = table_file_content_cache.get(tmdl_file_str)
+                if not content:
+                    with open(tmdl_file, 'r', encoding='utf-8') as f:
+                        content = f.read()
 
                 original_content = content
                 file_fixes = 0
 
-                # Fix each table that needs quoting
-                for table_name in tables_needing_quotes:
-                    table_quoted = quote_tmdl_name(table_name)
+                # Fix each table that needs quoting - OPTIMIZATION: use subn() instead of sub() + findall()
+                for table_name, table_quoted in table_names.items():
                     escaped_name = re.escape(table_name)
 
                     # Pattern 1: TableName[Column] -> 'TableName'[Column]
+                    # OPTIMIZATION: subn() returns (result, count) in one pass instead of sub() + findall() (2 passes)
                     pattern1 = rf"(?<!['\w]){escaped_name}(?=\s*\[)"
-                    content_before = content
-                    content = re.sub(pattern1, table_quoted, content)
-                    file_fixes += len(re.findall(pattern1, content_before))
+                    content, count1 = re.subn(pattern1, table_quoted, content)
+                    file_fixes += count1
 
                     # Pattern 2: Handle function calls like CALCULATE(SUM(TableName[Col]))
-                    # This pattern matches unquoted table names in DAX contexts
+                    # OPTIMIZATION: subn() is more efficient than re.sub() + len(re.findall())
                     pattern2 = rf"(\()\s*{escaped_name}(?=\s*[\[\,\)])"
-                    content_before = content
-                    content = re.sub(pattern2, rf"\1{table_quoted}", content)
-                    file_fixes += len(re.findall(pattern2, content_before))
+                    content, count2 = re.subn(pattern2, rf"\1{table_quoted}", content)
+                    file_fixes += count2
 
                 if content != original_content:
                     with open(tmdl_file, 'w', encoding='utf-8') as f:
@@ -711,7 +716,7 @@ class PowerBIPBIPConnector:
         return {
             "files_modified": files_modified,
             "count": total_fixes,
-            "tables_fixed": tables_needing_quotes,
+            "tables_fixed": list(table_names.keys()),
             "errors": errors
         }
 

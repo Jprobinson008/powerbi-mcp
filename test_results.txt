@@ -1,0 +1,103 @@
+
+======================================================================
+  PBIP CONNECTOR DAX QUOTING FIXES - COMPREHENSIVE TEST SUITE
+======================================================================
+
+======================================================================
+TEST 1: TMDL Quoting Functions
+======================================================================
+
+Subtest: needs_tmdl_quoting()
+  [PASS] needs_tmdl_quoting('Sales'): Simple name - no quotes needed
+  [PASS] needs_tmdl_quoting('Customer Appointments'): Name with space - quotes needed
+  [PASS] needs_tmdl_quoting('My Table Name'): Multi-word name - quotes needed
+  [PASS] needs_tmdl_quoting('_measures'): Underscore prefix - no quotes needed
+  [PASS] needs_tmdl_quoting('123Table'): Starts with digit - quotes needed
+  [PASS] needs_tmdl_quoting('table'): Reserved word - quotes needed
+  [PASS] needs_tmdl_quoting('Normal_Name'): Underscore in name - no quotes needed
+  [PASS] needs_tmdl_quoting('Name's'): Single quote in name - quotes needed
+  [PASS] needs_tmdl_quoting('Leads Sales Data'): Multi-word with spaces - quotes needed
+
+Subtest: quote_tmdl_name()
+  [PASS] quote_tmdl_name('Sales'): -> Sales
+  [PASS] quote_tmdl_name('Customer Appointments'): -> 'Customer Appointments'
+  [PASS] quote_tmdl_name('My Table's Data'): -> 'My Table''s Data'
+  [PASS] quote_tmdl_name('Leads Sales Data'): -> 'Leads Sales Data'
+
+Quoting tests: 13/13 passed
+
+======================================================================
+TEST 2: DAX Expression Validation
+======================================================================
+
+Subtest: fix_dax_table_references()
+  [PASS] fix_dax_table_references(): Simple unquoted table reference
+  [PASS] fix_dax_table_references(): Nested function with unquoted table
+  [PASS] fix_dax_table_references(): Already properly quoted
+  [PASS] fix_dax_table_references(): DAX with variable
+
+DAX validation tests: 4/4 passed
+
+======================================================================
+TEST 3: Table Rename with Proper Quoting
+======================================================================
+
+Subtest: Creating mock PBIP project
+  Testing PBIP project loading...
+  [PASS] Load project: Mock project loaded successfully
+
+  Testing DAX validation...
+  [PASS] Validation: Found 1 DAX quoting error(s)
+      - Table 'Leads Sales Data' in DAX expression must be quoted: use ''Leads Sales Data'' instead
+
+  Testing DAX quoting fix...
+  [PASS] Fix DAX: Fixed 1 references in 1 file(s)
+  [PASS] Validation after fix: Reduced DAX errors from 1 to 0
+
+  Testing table rename with proper quoting...
+  [PASS] Table rename: Renamed with 4 references updated
+  [PASS] Table declaration: Properly quoted after rename
+  [PASS] DAX reference in measure: Properly quoted after rename
+
+  Testing relationship updates...
+  [PASS] Relationship name update: Contains updated table name reference
+  [PASS] Relationship fromTable update: Properly quoted after rename
+
+======================================================================
+TEST 4: Complex Relationship Scenarios
+======================================================================
+  [PASS] Rename with relationships: Renamed with 4 references
+  [PASS] Relationship 1 name: Updated to quoted format
+  [PASS] Relationship 1 fromTable: Properly quoted
+  [PASS] Relationship 2 fromTable: Updated properly quoted version
+
+======================================================================
+TEST 4B: Column Rename in Relationships
+======================================================================
+  [PASS] Column rename in relationship: Renamed with 2 references
+  [PASS] Relationship fromColumn update: Column renamed in relationship
+  [PASS] Relationship fromTable unchanged: Table reference preserved
+
+======================================================================
+TEST 5: Complex DAX Scenarios
+======================================================================
+  [PASS] Complex DAX: Multiple table references: Correctly fixed
+  [PASS] Complex DAX: Nested functions: Correctly fixed
+  [PASS] Complex DAX: Mixed quoted and unquoted: Correctly fixed
+
+Complex DAX tests: 3/3 passed
+
+======================================================================
+  TEST SUMMARY
+======================================================================
+  [OK] PASS  - TMDL Quoting
+  [OK] PASS  - DAX Validation
+  [OK] PASS  - Table Rename
+  [OK] PASS  - Relationship Scenarios
+  [OK] PASS  - Column Rename in Relationships
+  [OK] PASS  - Complex DAX
+
+  Total: 6/6 test groups passed
+======================================================================
+
+  ALL TESTS PASSED!
