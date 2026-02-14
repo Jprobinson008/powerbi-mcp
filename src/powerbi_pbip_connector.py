@@ -540,6 +540,7 @@ class PowerBIPBIPConnector:
 
         # Build set of table names that need quoting
         tables_needing_quotes = set()
+        all_table_names = set()
         try:
             for tmdl_file in self.current_project.tmdl_files:
                 with open(tmdl_file, 'r', encoding='utf-8') as f:
@@ -548,11 +549,13 @@ class PowerBIPBIPConnector:
                 # Pattern 1: table 'Name With Spaces'
                 for match in re.finditer(r"^table\s+'([^']+)'", content, re.MULTILINE):
                     table_name = match.group(1).replace("''", "'")  # Unescape quotes
+                    all_table_names.add(table_name)
                     if needs_tmdl_quoting(table_name):
                         tables_needing_quotes.add(table_name)
                 # Pattern 2: table UnquotedName
                 for match in re.finditer(r"^table\s+(\w+)\s*$", content, re.MULTILINE):
                     table_name = match.group(1)
+                    all_table_names.add(table_name)
                     if needs_tmdl_quoting(table_name):
                         tables_needing_quotes.add(table_name)
         except Exception:
@@ -561,7 +564,8 @@ class PowerBIPBIPConnector:
         for tmdl_file in self.current_project.tmdl_files:
             try:
                 with open(tmdl_file, 'r', encoding='utf-8') as f:
-                    lines = f.readlines()
+                    content = f.read()
+                    lines = content.split('\n')
 
                 for i, line in enumerate(lines, 1):
                     stripped = line.strip()
@@ -595,20 +599,23 @@ class PowerBIPBIPConnector:
                                         context=stripped
                                     ))
 
-                    # Check for unquoted table references in DAX (measure/column expressions)
-                    if 'expression:' in stripped or '=' in stripped:
-                        # Check for unquoted table references that need quoting
-                        for table_name in tables_needing_quotes:
-                            # Pattern: unquoted TableName[Column] where table has spaces
-                            if re.search(rf"(?<!['\w]){re.escape(table_name)}(?=\s*\[)", stripped):
-                                errors.append(ValidationError(
-                                    file_path=str(tmdl_file),
-                                    line_number=i,
-                                    error_type="UNQUOTED_TABLE_IN_DAX",
-                                    message=f"Table '{table_name}' in DAX expression must be quoted: use '{quote_tmdl_name(table_name)}' instead of '{table_name}'",
-                                    context=stripped
-                                ))
-                                break  # Only report once per line
+                # Check for unquoted table references in DAX (measure/column expressions)
+                # Process entire file content to handle multi-line expressions
+                for table_name in tables_needing_quotes:
+                    # Pattern: unquoted TableName[Column] where table has spaces
+                    pattern = rf"(?<!['\w]){re.escape(table_name)}(?=\s*\[)"
+                    for match in re.finditer(pattern, content):
+                        # Find which line this match is on
+                        pos = match.start()
+                        line_num = content[:pos].count('\n') + 1
+                        line_content = lines[line_num - 1] if line_num <= len(lines) else ""
+                        errors.append(ValidationError(
+                            file_path=str(tmdl_file),
+                            line_number=line_num,
+                            error_type="UNQUOTED_TABLE_IN_DAX",
+                            message=f"Table '{table_name}' in DAX expression must be quoted: use '{quote_tmdl_name(table_name)}' instead",
+                            context=line_content.strip()
+                        ))
 
             except Exception as e:
                 errors.append(ValidationError(
@@ -1224,6 +1231,11 @@ class PowerBIPBIPConnector:
             (rf"(toColumn\s*:\s*'{table_escaped}'\.)({old_escaped})(?=\s|$)", rf'\1{new_name_quoted}', re.MULTILINE),
             # toColumn: 'TableName'.'OldColumn' -> toColumn: 'TableName'.'NewColumn'
             (rf"(toColumn\s*:\s*'{table_escaped}'\.)'{old_escaped}'", rf'\1{new_name_quoted}', 0),
+            # NEW: Plain column references in relationships without table prefix
+            # fromColumn: OldColumn -> fromColumn: NewColumn (for table context provided by fromTable)
+            (rf'(fromColumn\s*:\s*)({old_escaped})(?=\s*$)', rf'\1{new_name_quoted}', re.MULTILINE),
+            # toColumn: OldColumn -> toColumn: NewColumn (for table context provided by toTable)
+            (rf'(toColumn\s*:\s*)({old_escaped})(?=\s*$)', rf'\1{new_name_quoted}', re.MULTILINE),
         ]
 
         for tmdl_file in self.current_project.tmdl_files:
