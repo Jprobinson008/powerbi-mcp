@@ -1,0 +1,49 @@
+{
+  "benchmarks": [
+    {
+      "operation": "load_small",
+      "time_ms": 11.776899977121502
+    },
+    {
+      "operation": "validate_small",
+      "time_ms": 101.27360001206398
+    },
+    {
+      "operation": "fix_dax_small",
+      "time_ms": 3.489100025035441
+    },
+    {
+      "operation": "rename_table_small",
+      "time_ms": 56.64640001486987
+    },
+    {
+      "operation": "load_medium",
+      "time_ms": 21.893400000408292
+    },
+    {
+      "operation": "validate_medium",
+      "time_ms": 194.7121000266634
+    },
+    {
+      "operation": "fix_dax_medium",
+      "time_ms": 11.003999970853329
+    },
+    {
+      "operation": "load_large",
+      "time_ms": 95.58249998372048
+    },
+    {
+      "operation": "validate_large",
+      "time_ms": 1292.1501999953762
+    },
+    {
+      "operation": "fix_dax_large",
+      "time_ms": 46.594200015533715
+    }
+  ],
+  "summary": {
+    "small_avg_ms": 43.2965000072727,
+    "medium_avg_ms": 75.86983333264168,
+    "large_avg_ms": 478.1089666648768
+  }
+}

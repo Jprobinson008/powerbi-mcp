@@ -526,96 +526,108 @@ class PowerBIPBIPConnector:
 
     # ==================== VALIDATION ====================
 
-    def validate_tmdl_syntax(self) -> List[ValidationError]:
+    def validate_tmdl_syntax(self, max_errors: int = None) -> List[ValidationError]:
         """
         Validate TMDL files for common syntax errors
 
+        Args:
+            max_errors: Optional limit - stop early after finding this many errors (for performance)
+
         Returns:
-            List of validation errors found
+            List of validation errors found (up to max_errors if specified)
         """
         errors = []
 
         if not self.current_project or not self.current_project.tmdl_files:
             return errors
 
-        # Build set of table names that need quoting
+        # Build set of table names that need quoting - SINGLE PASS through files
         tables_needing_quotes = set()
-        all_table_names = set()
+        file_contents_cache = {}  # Cache to avoid re-reading
+        
         try:
             for tmdl_file in self.current_project.tmdl_files:
                 with open(tmdl_file, 'r', encoding='utf-8') as f:
                     content = f.read()
+                    file_contents_cache[str(tmdl_file)] = content
+                
                 # Find all table declarations (handle both quoted and unquoted names)
                 # Pattern 1: table 'Name With Spaces'
                 for match in re.finditer(r"^table\s+'([^']+)'", content, re.MULTILINE):
                     table_name = match.group(1).replace("''", "'")  # Unescape quotes
-                    all_table_names.add(table_name)
                     if needs_tmdl_quoting(table_name):
                         tables_needing_quotes.add(table_name)
                 # Pattern 2: table UnquotedName
                 for match in re.finditer(r"^table\s+(\w+)\s*$", content, re.MULTILINE):
                     table_name = match.group(1)
-                    all_table_names.add(table_name)
                     if needs_tmdl_quoting(table_name):
                         tables_needing_quotes.add(table_name)
         except Exception:
             pass
 
+        # Pre-compile patterns for efficiency
+        table_name_pattern = re.compile(r"^table\s+")
+        from_to_pattern = re.compile(r"(fromTable|toTable):\s*(.+?)(?:\s*$|\s+\w+:)")
+
         for tmdl_file in self.current_project.tmdl_files:
             try:
-                with open(tmdl_file, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                    lines = content.split('\n')
+                tmdl_file_str = str(tmdl_file)
+                content = file_contents_cache.get(tmdl_file_str)
+                if not content:
+                    with open(tmdl_file, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                
+                lines = content.split('\n')
 
                 for i, line in enumerate(lines, 1):
                     stripped = line.strip()
 
-                    # Check for unquoted names with spaces in declarations
-                    # Pattern: "table Name With Spaces" (without quotes)
+                    # Check for unquoted names with spaces in declarations - OPTIMIZED pattern
                     if stripped.startswith('table '):
                         name_part = stripped[6:].strip()
                         if ' ' in name_part and not name_part.startswith("'"):
                             errors.append(ValidationError(
-                                file_path=str(tmdl_file),
+                                file_path=tmdl_file_str,
                                 line_number=i,
                                 error_type="UNQUOTED_NAME",
                                 message=f"Table name with spaces must be quoted: {name_part}",
                                 context=stripped
                             ))
+                            if max_errors and len(errors) >= max_errors:
+                                return errors
 
-                    # Check fromTable/toTable references
-                    for prefix in ['fromTable:', 'toTable:']:
-                        if prefix in stripped:
-                            # Extract the name after the prefix
-                            match = re.search(rf'{prefix}\s*(.+?)(?:\s*$|\s+\w+:)', stripped)
-                            if match:
-                                name_part = match.group(1).strip()
-                                if ' ' in name_part and not name_part.startswith("'"):
-                                    errors.append(ValidationError(
-                                        file_path=str(tmdl_file),
-                                        line_number=i,
-                                        error_type="UNQUOTED_REFERENCE",
-                                        message=f"Relationship reference with spaces must be quoted: {name_part}",
-                                        context=stripped
-                                    ))
+                    # Check fromTable/toTable references - OPTIMIZED with pre-compiled pattern
+                    if 'fromTable:' in stripped or 'toTable:' in stripped:
+                        for match in from_to_pattern.finditer(stripped):
+                            name_part = match.group(2).strip()
+                            if ' ' in name_part and not name_part.startswith("'"):
+                                errors.append(ValidationError(
+                                    file_path=tmdl_file_str,
+                                    line_number=i,
+                                    error_type="UNQUOTED_REFERENCE",
+                                    message=f"Relationship reference with spaces must be quoted: {name_part}",
+                                    context=stripped
+                                ))
+                                if max_errors and len(errors) >= max_errors:
+                                    return errors
 
-                # Check for unquoted table references in DAX (measure/column expressions)
-                # Process entire file content to handle multi-line expressions
-                for table_name in tables_needing_quotes:
-                    # Pattern: unquoted TableName[Column] where table has spaces
-                    pattern = rf"(?<!['\w]){re.escape(table_name)}(?=\s*\[)"
-                    for match in re.finditer(pattern, content):
-                        # Find which line this match is on
-                        pos = match.start()
-                        line_num = content[:pos].count('\n') + 1
-                        line_content = lines[line_num - 1] if line_num <= len(lines) else ""
-                        errors.append(ValidationError(
-                            file_path=str(tmdl_file),
-                            line_number=line_num,
-                            error_type="UNQUOTED_TABLE_IN_DAX",
-                            message=f"Table '{table_name}' in DAX expression must be quoted: use '{quote_tmdl_name(table_name)}' instead",
-                            context=line_content.strip()
-                        ))
+                # Check for unquoted table references in DAX - OPTIMIZED with batch processing
+                if tables_needing_quotes:
+                    for table_name in tables_needing_quotes:
+                        pattern = rf"(?<!['\w]){re.escape(table_name)}(?=\s*\[)"
+                        for match in re.finditer(pattern, content):
+                            pos = match.start()
+                            line_num = content[:pos].count('\n') + 1
+                            line_content = lines[line_num - 1] if line_num <= len(lines) else ""
+                            errors.append(ValidationError(
+                                file_path=tmdl_file_str,
+                                line_number=line_num,
+                                error_type="UNQUOTED_TABLE_IN_DAX",
+                                message=f"Table '{table_name}' in DAX expression must be quoted: use '{quote_tmdl_name(table_name)}' instead",
+                                context=line_content.strip()
+                            ))
+                            if max_errors and len(errors) >= max_errors:
+                                return errors
 
             except Exception as e:
                 errors.append(ValidationError(
@@ -625,6 +637,8 @@ class PowerBIPBIPConnector:
                     message=str(e),
                     context=""
                 ))
+                if max_errors and len(errors) >= max_errors:
+                    return errors
 
         return errors
 
